@@ -1,0 +1,27 @@
+Lab 6 Notes:
+
+Main project files: bounce_part1.c, bounce_part2.c, bounce_part3.c – contains main()
+EC: bounce_ec.c
+
+Broken into multiple parts (ex: labs 1-3).
+
+Oled.h and .c are given as is - don't mess with them.
+
+Overall notes:
+--------------
+-> LATE  register Each bit in this register controls the output of a pin: 1 means high and 0 
+means low. 
+(The LEDs are on pins E0 through E7 and a high output corresponds to the LED being enabled or on.)
+
+-> TRISE register Turns pin into an input and clearing that bit (to 0) sets it to an output
+
+
+PART 1:
+-------
+>Create the led.h file.
+
+-> Header guards are required for file.
+-> IN file add xc.h file.
+-> using a struct (TimerResult)
+
+-> No leds files given.

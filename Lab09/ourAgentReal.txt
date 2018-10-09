@@ -1,0 +1,490 @@
+// ArtificialAgent.c
+// Kyle O'Rourke & Isaiah Barron
+// 3/9/2018
+
+#include "Agent.h"
+#include "Protocol.h"
+#include "Field.h"
+#include "BOARD.h"
+#include "Uart1.h"
+#include "FieldOled.h"
+#include "Oled.h"
+
+// 
+#include <stdlib.h>
+#include <string.h>
+
+
+// **** Set any macros or preprocessor directives here ****
+#define HEX_ZERO 0x00
+#define max32uint 4294967295
+// **** Declare any data types here ****
+static Field myField;
+static Field enemyField;
+static AgentState state;
+static NegotiationData negDataRx; //theirData
+static NegotiationData negDataTx; //ourData
+ProtocolParserStatus decodeReturn;
+TurnOrder whoFirs;
+static GuessData guess;
+
+typedef struct {
+    int row;
+    int col;
+} rndCoor;
+
+// **** Define any module-level, global, or external variables here ****
+static FieldOledTurn whoTurn = FIELD_OLED_TURN_NONE;
+uint8_t validateNegData;
+
+// **** Declare any function prototypes here ****
+void addBoatRandom(Field *myField, BoatType type);
+void GenerateRndCoor(rndCoor *coo);
+
+/**
+ * The Run() function for an Agent takes in a single character. It then waits until enough
+ * data is read that it can decode it as a full sentence via the Protocol interface. This data
+ * is processed with any output returned via 'outBuffer', which is guaranteed to be 255
+ * characters in length to allow for any valid NMEA0183 messages. The return value should be
+ * the number of characters stored into 'outBuffer': so a 0 is both a perfectly valid output and
+ * means a successful run.
+ * @param in The next character in the incoming message stream.
+ * @param outBuffer A string that should be transmit to the other agent. NULL if there is no
+ *                  data.
+ * @return The length of the string pointed to by outBuffer (excludes \0 character).
+ */
+int AgentRun(char in, char *outBuffer) {
+
+    switch (state) {
+        case AGENT_STATE_GENERATE_NEG_DATA:
+        {
+            // Update state and leave:
+            state = AGENT_STATE_SEND_CHALLENGE_DATA;
+            
+            // Generate our negotiation data:
+            ProtocolGenerateNegotiationData(&negDataTx);
+            
+            // Check to see if we got a message before the button press:
+            if(ProtocolDecode(in, &negDataRx, &guess) == PROTOCOL_PARSING_GOOD){
+                // We are the second one to press the button:
+                
+            }
+            
+            return ProtocolEncodeChaMessage(outBuffer, &negDataTx);
+            break;
+        }
+        case AGENT_STATE_SEND_CHALLENGE_DATA: // Stays in this state until cha message received.
+        {
+            // decoded received CHA message one character at a time.
+            decodeReturn = ProtocolDecode(in, &negDataRx, &guess);
+
+            if (decodeReturn == PROTOCOL_PARSED_CHA_MESSAGE)
+            {
+                //record data
+                state = AGENT_STATE_DETERMINE_TURN_ORDER;
+
+                //send det data
+                return ProtocolEncodeDetMessage(outBuffer, &negDataTx);
+                
+            } 
+            else if (decodeReturn == PROTOCOL_PARSING_FAILURE)
+            {
+                // FAIL
+                // Need to print: AGENT_ERROR_STRING_PARSIN
+                OledClear(OLED_COLOR_BLACK);
+                OledUpdate();
+                OledDrawString("fail 1");
+                OledUpdate();
+                while(1){};
+
+                state = AGENT_STATE_INVALID;
+                OledClear(OLED_COLOR_BLACK);
+                OledDrawString(AGENT_ERROR_STRING_PARSING);
+                OledUpdate();
+            }
+            
+            OledClear(OLED_COLOR_BLACK);
+            if(decodeReturn == 0){
+                OledDrawString("Waiting for cha");
+                OledUpdate();
+            }
+            
+            break;
+        }
+        case AGENT_STATE_DETERMINE_TURN_ORDER:
+        {
+            
+            // Decode determine message:
+            decodeReturn = ProtocolDecode(in, &negDataRx, &guess);
+            
+//            OledClear(OLED_COLOR_BLACK);
+//            OledUpdate();
+//            OledDrawString("det aft dec");
+//            OledUpdate();
+//            while(1){};
+
+            if (decodeReturn == PROTOCOL_PARSING_GOOD) 
+            {
+                state = AGENT_STATE_DETERMINE_TURN_ORDER;
+                        
+                OledClear(OLED_COLOR_BLACK);
+                OledUpdate();
+                OledDrawString("det1");
+                OledUpdate();
+                while(1){};
+                
+                return FALSE;
+            } 
+            else if (decodeReturn == PROTOCOL_PARSED_DET_MESSAGE) 
+            {
+                
+                OledClear(OLED_COLOR_BLACK);
+                OledUpdate();
+                OledDrawString("det2");
+                OledUpdate();
+                while(1){};
+
+                //determine who goes first
+                whoFirs = ProtocolGetTurnOrder(&negDataTx, &negDataRx);
+                
+                //validate opponents data
+                validateNegData = ProtocolValidateNegotiationData(&negDataRx);
+
+                //checks to see if data is valid
+                if (validateNegData == FALSE) {
+                    state = AGENT_STATE_INVALID;
+                    OledClear(OLED_COLOR_BLACK);
+                    OledDrawString(AGENT_ERROR_STRING_NEG_DATA);
+                    OledUpdate();
+                    return FALSE;
+                }
+
+                //we win
+                if (whoFirs == TURN_ORDER_START)
+                {
+                    state = AGENT_STATE_SEND_GUESS;
+                    whoTurn = FIELD_OLED_TURN_MINE;
+                    FieldOledDrawScreen(&myField, &enemyField, whoTurn);
+                }//dey win, end life.
+                else if (whoFirs == TURN_ORDER_DEFER) 
+                {
+                    state = AGENT_STATE_WAIT_FOR_GUESS;
+                    whoTurn = FIELD_OLED_TURN_THEIRS;
+                    FieldOledDrawScreen(&myField, &enemyField, whoTurn);
+                }//nobody do nating
+                else if (whoFirs == TURN_ORDER_TIE) 
+                {
+                    // Tie. Oled set to error string:
+                    state = AGENT_STATE_INVALID;
+                    OledClear(OLED_COLOR_BLACK);
+                    OledDrawString(AGENT_ERROR_STRING_ORDERING);
+                    OledUpdate();
+                }
+            } 
+            else if (decodeReturn == PROTOCOL_PARSING_FAILURE)
+            {
+                // FAIL
+                // Need to print: AGENT_ERROR_STRING_NEG_DAT
+                OledClear(OLED_COLOR_BLACK);
+                OledUpdate();
+                OledDrawString("det3");
+                OledUpdate();
+                while(1){};
+
+                state = AGENT_STATE_INVALID;
+                OledClear(OLED_COLOR_BLACK);
+                OledDrawString(AGENT_ERROR_STRING_PARSING);
+                OledUpdate();
+                break;
+            }
+            
+            
+            OledClear(OLED_COLOR_BLACK);
+            if(decodeReturn == 0){
+                OledDrawString("Waiting for det");
+                OledUpdate();
+            }
+            if(decodeReturn == 1){
+                OledDrawString("detB");
+                OledUpdate();
+                while(1){};
+            }
+            if(decodeReturn == 2){
+                OledDrawString("detC");
+                OledUpdate();
+                while(1){};
+            }
+            if(decodeReturn == 3){
+                OledDrawString("detD");
+                OledUpdate();
+                while(1){};
+            }
+            if(decodeReturn == 4){
+                OledDrawString("detE");
+                OledUpdate();
+                while(1){};
+            }
+            if(decodeReturn == 5){
+                OledDrawString("detF");
+                OledUpdate();
+                while(1){};
+            }
+            break;
+        }
+        case AGENT_STATE_WAIT_FOR_GUESS://wait for opponent guess
+        {
+            //decode enemy guess
+            decodeReturn = ProtocolDecode(in, &negDataRx, &guess);
+
+            OledClear(OLED_COLOR_BLACK);
+            OledUpdate();
+            OledDrawString("wait for guess state");
+            OledUpdate();
+            while(1){};
+                
+            //receive an enemy coordinate
+            if (AgentGetStatus() == HEX_ZERO) 
+            {
+                state = AGENT_STATE_LOST;
+                whoTurn = FIELD_OLED_TURN_NONE;
+                FieldOledDrawScreen(&myField, &enemyField, whoTurn);
+                return ProtocolEncodeHitMessage(outBuffer, &guess);
+            } 
+            else if ((decodeReturn == PROTOCOL_PARSED_COO_MESSAGE))
+            {
+
+                state = AGENT_STATE_SEND_GUESS;
+                whoTurn = FIELD_OLED_TURN_MINE;
+
+                //check to see if enemy coordinates was a hit
+                FieldRegisterEnemyAttack(&myField, &guess);
+
+                FieldOledDrawScreen(&myField, &enemyField, whoTurn);
+                return ProtocolEncodeHitMessage(outBuffer, &guess);
+            } 
+            else if (decodeReturn == PROTOCOL_PARSING_FAILURE)
+            {
+                OledClear(OLED_COLOR_BLACK);
+                OledUpdate();
+                OledDrawString("parse fail 3");
+                OledUpdate();
+                while (1) {
+                };
+
+                state = AGENT_STATE_INVALID;
+                OledClear(OLED_COLOR_BLACK);
+                OledDrawString(AGENT_ERROR_STRING_PARSING);
+                OledUpdate();
+            }
+            break;
+        }
+        case AGENT_STATE_SEND_GUESS://send our coordinates
+        {
+            state = AGENT_STATE_WAIT_FOR_HIT;
+            
+            OledClear(OLED_COLOR_BLACK);
+            OledUpdate();
+            OledDrawString("send guess state");
+            OledUpdate();
+            while(1){};
+
+            rndCoor coo;
+            GenerateRndCoor(&coo);
+
+            //to prevent the game from running for one second
+            int speed = BOARD_GetPBClock() / 8;
+            int stop;
+            for (stop = 0; stop <= speed; stop++) {
+                //do nothing
+            }
+
+            return ProtocolEncodeCooMessage(outBuffer, &guess);
+            break;
+        }
+        case AGENT_STATE_WAIT_FOR_HIT://wait for our coordinates to register a hit or not
+        {
+            //decode opponents coo message
+            decodeReturn = ProtocolDecode(in, &negDataRx, &guess);
+
+
+            if ((decodeReturn == PROTOCOL_PARSED_HIT_MESSAGE) && !AgentGetEnemyStatus()) {
+                OledClear(OLED_COLOR_BLACK);
+                OledUpdate();
+                OledDrawString("Won");
+                OledUpdate();
+                while (1) {
+                };
+
+                state = AGENT_STATE_WON;
+                whoTurn = FIELD_OLED_TURN_NONE;
+                FieldOledDrawScreen(&myField, &enemyField, whoTurn);
+            } else if ((decodeReturn == PROTOCOL_PARSED_HIT_MESSAGE) && AgentGetEnemyStatus()) {
+                /*OledClear(OLED_COLOR_BLACK);
+                OledUpdate();
+                OledDrawString("go to wait for guess");
+                OledUpdate();
+                while(1){};*/
+
+                state = AGENT_STATE_WAIT_FOR_GUESS;
+                FieldUpdateKnowledge(&enemyField, &guess);
+                whoTurn = FIELD_OLED_TURN_THEIRS;
+                FieldOledDrawScreen(&myField, &enemyField, whoTurn);
+            } else if (decodeReturn == PROTOCOL_PARSING_FAILURE) {
+                OledClear(OLED_COLOR_BLACK);
+                OledUpdate();
+                OledDrawString("parse fail 4");
+                OledUpdate();
+                while (1) {
+                };
+
+                state = AGENT_STATE_INVALID;
+                OledClear(OLED_COLOR_BLACK);
+                OledDrawString(AGENT_ERROR_STRING_PARSING);
+                OledUpdate();
+            }
+            break;
+        }
+        case AGENT_STATE_INVALID:
+        {
+            break;
+        }
+        case AGENT_STATE_LOST:
+        {
+            break;
+        }
+        case AGENT_STATE_WON:
+        {
+            break;
+        }
+    }
+    return FALSE;
+}
+
+/**
+ * The Init() function for an Agent sets up everything necessary for an agent before the game
+ * starts. This can include things like initialization of the field, placement of the boats,
+ * etc. The agent can assume that stdlib's rand() function has been seeded properly in order to
+ * use it safely within.
+ *   Implement an AgentInit() function that randomly places the boats. There
+ *   should be no pattern or hard-coded layout, it should be entirely random on
+ *   a ship-by-ship basis. This also applies to their direction, so that all possible
+ *   ship layouts could be generated by your code.
+ */
+void AgentInit(void) {
+    state = AGENT_STATE_GENERATE_NEG_DATA;
+
+    // Step 0: Clear field and fill with empty space.
+    FieldInit(&myField, FIELD_POSITION_EMPTY);
+
+    //Step 1: set enemy field to unknown
+    FieldInit(&enemyField, FIELD_POSITION_UNKNOWN);
+
+    // Step 2: Add huge boat to field:
+    addBoatRandom(&myField, FIELD_BOAT_HUGE);
+
+    // Step 3: Add large boat to field:
+    addBoatRandom(&myField, FIELD_BOAT_LARGE);
+
+    // Step 4: Add medium boat to field:
+    addBoatRandom(&myField, FIELD_BOAT_MEDIUM);
+
+    // Step 5: Add small boat to field:
+    addBoatRandom(&myField, FIELD_BOAT_SMALL);
+
+    // Step 6: Draw playing field:
+    FieldOledDrawScreen(&myField, &enemyField, FIELD_OLED_TURN_NONE);
+}
+
+// Function that adds a boat to a random & valid location.
+
+void addBoatRandom(Field *myField, BoatType type) {
+
+    while (TRUE) {
+
+        // Step 1: Pick random location for Col and Row
+        uint8_t row = (rand()) % ((FIELD_ROWS - 1) + 1);
+        uint8_t col = (rand()) % ((FIELD_COLS - 1) + 1);
+
+        // Step 2: Pick random direction:
+        BoatDirection dir = (rand()) % (3 + 1);
+
+        // Step 3: Verify if given parameters are acceptable.
+        if (FieldAddBoat(myField, row, col, dir, type)) {
+            // Success
+            return;
+        } else {
+            // Failure. Try again.
+            continue;
+        }
+
+    } // While end
+
+}
+
+/**
+ * StateCheck() returns a 4-bit number indicating the status of that agent's ships. The smallest
+ * ship, the 3-length one, is indicated by the 0th bit, the medium-length ship (4 tiles) is the
+ * 1st bit, etc. until the 3rd bit is the biggest (6-tile) ship. This function is used within
+ * main() to update the LEDs displaying each agents' ship status. This function is similar to
+ * Field::FieldGetBoatStates().
+ * @return A bitfield indicating the sunk/unsunk status of each ship under this agent's control.
+ *
+ * @see Field.h:FieldGetBoatStates()
+ * @see Field.h:BoatStatus
+ */
+uint8_t AgentGetStatus(void) {
+    return (FieldGetBoatStates(&myField));
+}
+
+/**
+ * This function returns the same data as `AgentCheckState()`, but for the enemy agent.
+ * @return A bitfield indicating the sunk/unsunk status of each ship under the enemy agent's
+ *         control.
+ *
+ * @see Field.h:FieldGetBoatStates()
+ * @see Field.h:BoatStatus
+ */
+uint8_t AgentGetEnemyStatus(void) {
+    return (FieldGetBoatStates(&enemyField));
+
+}
+
+
+//Function that generates a random coordinate for AgentRun
+
+void GenerateRndCoor(rndCoor * coo) {
+    while (TRUE) {
+        coo->row = rand() % FIELD_ROWS;
+        coo->col = rand() % FIELD_COLS;
+
+        // Check if out of space near edge:
+        /*if((coo->row > (FIELD_ROWS-1)) || (coo->row < 0)){
+            // OUT OF SPACE.
+            continue;
+        }
+        if((coo->col > (FIELD_COLS-1)) || (coo->col < 0)){
+            // OUT OF SPACE.
+            continue;
+        }*/
+
+        FieldPosition pos;
+
+        pos = FieldAt(&enemyField, coo->row, coo->col);
+
+        if (pos == FIELD_POSITION_UNKNOWN) {
+            guess.row = coo->row;
+            guess.col = coo->col;
+            return;
+        }
+    }
+}
+
+// Helper function that calls rand and returns a number equal to or between max and min
+
+int map(int input, int input_start, int input_end, int output_start, int output_end) {
+    int input_range = input_end - input_start;
+    int output_range = output_end - output_start;
+
+    int output = (input - input_start) * output_range / input_range + output_start;
+    return output;
+}
